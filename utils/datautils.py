@@ -98,3 +98,20 @@ class ImageItemList(Dataset):
             label = self.target_transform(label)
 
         return img, label
+
+
+
+class RandomBluring(object):
+
+    def __init__(self, p=0.5, high=2):
+
+        self.p = p
+        self.high = high
+
+    def __call__(self, img):
+
+        if random.uniform(0, 1) < self.p:
+            r = random.randint(1, self.high)
+            img = img.filter(ImageFilter.GaussianBlur(radius=r))
+
+        return img
