@@ -5,3 +5,4 @@
     * datautils.py: contains a custom dataset&dataloader api and some data augmentation functions;
     * layerutils.py: contains some custom layers;
     * lossutils.py: contains popular loss functions used in face recognition task, e.g. Arcface;
+3. **solver.py**: this is a code written with pytorch-lightning library;
