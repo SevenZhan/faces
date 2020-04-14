@@ -31,7 +31,7 @@ class Learner(pl.LightningModule):
         super().__init__()
 
         self.hparams = hparams
-        self.data = Spliter(self.hparams.root)
+        self.data = Spliter(self.hparams.roots, self.hparams.threds)
 
         self.features = Extractor()
         self.fc = NormLinear(512, len(self.data.labels))
@@ -108,8 +108,8 @@ class Learner(pl.LightningModule):
 if __name__ == "__main__":
 
     parser = ArgumentParser()
-    parser.add_argument("--root", type=str, default='',
-                        help="path to training/validation images")
+    parser.add_argument("--roots", type=str, default='', help="path to training/validation images")
+    parser.add_argument("--threds", type=int, default=0, help="threshold for valid training/validation images folder")
     parser.add_argument("--bs", type=int, default=512, help="input batch size for training")
     parser.add_argument("--lr", type=float, default=1e-1, help="max learning rate")
 
