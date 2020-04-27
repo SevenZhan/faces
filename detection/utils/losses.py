@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
-from utils.box_utils import match, log_sum_exp
-from data import cfg_mnet
+
+from utils.utils import match, log_sum_exp
+from config import cfg_mnet
 GPU = cfg_mnet['gpu_train']
+
+
 
 class MultiBoxLoss(nn.Module):
     """SSD Weighted Loss Function
@@ -30,7 +32,8 @@ class MultiBoxLoss(nn.Module):
     """
 
     def __init__(self, num_classes, overlap_thresh, prior_for_matching, bkg_label, neg_mining, neg_pos, neg_overlap, encode_target):
-        super(MultiBoxLoss, self).__init__()
+        super().__init__()
+
         self.num_classes = num_classes
         self.threshold = overlap_thresh
         self.background_label = bkg_label
