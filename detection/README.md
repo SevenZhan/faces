@@ -1,1 +1,1 @@
-# This repo contains codes for retina face borrowed from https://github.com/biubug6/Pytorch_Retinaface.
+# This repo contains codes for retina face borrowed from https://github.com/biubug6/Pytorch_Retinaface and https://github.com/supernotman/RetinaFace_Pytorch.
