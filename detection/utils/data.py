@@ -5,276 +5,53 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .utils import matrix_iof
 
+def collater(data):
 
+    batch_size = len(data)
+    imgs = [s['img'] for s in data]
+    annots = [s['annot'] for s in data]
 
-def detection_collate(batch):
-    """Custom collate fn for dealing with batches of images that have a different
-    number of associated object annotations (bounding boxes).
+    # batch images
+    height = imgs[0].shape[0]
+    width = imgs[0].shape[1]
+    assert height == width, 'Input width must eqs height'
+    batched_imgs = torch.zeros(batch_size, height, width, 3)
+    for i in range(batch_size):
+        img = imgs[i]
+        batched_imgs[i, :] = img
 
-    Arguments:
-        batch: (tuple) A tuple of tensor images and lists of annotations
-
-    Return:
-        A tuple containing:
-            1) (tensor) batch of images stacked on their 0 dim
-            2) (list of tensors) annotations for a given image are stacked on 0 dim
-    """
-    targets = []
-    imgs = []
-    for _, sample in enumerate(batch):
-        for _, tup in enumerate(sample):
-            if torch.is_tensor(tup):
-                imgs.append(tup)
-            elif isinstance(tup, type(np.empty(0))):
-                annos = torch.from_numpy(tup).float()
-                targets.append(annos)
-
-    return (torch.stack(imgs, 0), targets)
-
-
-
-def _crop(image, boxes, labels, landm, img_dim):
-    height, width, _ = image.shape
-    pad_image_flag = True
-
-    for _ in range(250):
-        """
-        if random.uniform(0, 1) <= 0.2:
-            scale = 1.0
+    # batch annotations
+    max_num_annots = max(annot.shape[0] for annot in annots)
+    if max_num_annots > 0:
+        if annots[0].shape[1] > 4:
+            annot_padded = torch.ones((len(annots), max_num_annots, 14)) * -1
+            for idx, annot in enumerate(annots):
+                if annot.shape[0] > 0:
+                    annot_padded[idx, :annot.shape[0], :] = annot
         else:
-            scale = random.uniform(0.3, 1.0)
-        """
-        PRE_SCALES = [0.3, 0.45, 0.6, 0.8, 1.0]
-        scale = random.choice(PRE_SCALES)
-        short_side = min(width, height)
-        w = int(scale * short_side)
-        h = w
-
-        if width == w:
-            l = 0
-        else:
-            l = random.randrange(width - w)
-        if height == h:
-            t = 0
-        else:
-            t = random.randrange(height - h)
-        roi = np.array((l, t, l + w, t + h))
-
-        value = matrix_iof(boxes, roi[np.newaxis])
-        flag = (value >= 1)
-        if not flag.any():
-            continue
-
-        centers = (boxes[:, :2] + boxes[:, 2:]) / 2
-        mask_a = np.logical_and(roi[:2] < centers, centers < roi[2:]).all(axis=1)
-        boxes_t = boxes[mask_a].copy()
-        labels_t = labels[mask_a].copy()
-        landms_t = landm[mask_a].copy()
-        landms_t = landms_t.reshape([-1, 5, 2])
-
-        if boxes_t.shape[0] == 0:
-            continue
-
-        image_t = image[roi[1]:roi[3], roi[0]:roi[2]]
-
-        boxes_t[:, :2] = np.maximum(boxes_t[:, :2], roi[:2])
-        boxes_t[:, :2] -= roi[:2]
-        boxes_t[:, 2:] = np.minimum(boxes_t[:, 2:], roi[2:])
-        boxes_t[:, 2:] -= roi[:2]
-
-        # landm
-        landms_t[:, :, :2] = landms_t[:, :, :2] - roi[:2]
-        landms_t[:, :, :2] = np.maximum(landms_t[:, :, :2], np.array([0, 0]))
-        landms_t[:, :, :2] = np.minimum(landms_t[:, :, :2], roi[2:] - roi[:2])
-        landms_t = landms_t.reshape([-1, 10])
-
-
-	# make sure that the cropped image contains at least one face > 16 pixel at training image scale
-        b_w_t = (boxes_t[:, 2] - boxes_t[:, 0] + 1) / w * img_dim
-        b_h_t = (boxes_t[:, 3] - boxes_t[:, 1] + 1) / h * img_dim
-        mask_b = np.minimum(b_w_t, b_h_t) > 0.0
-        boxes_t = boxes_t[mask_b]
-        labels_t = labels_t[mask_b]
-        landms_t = landms_t[mask_b]
-
-        if boxes_t.shape[0] == 0:
-            continue
-
-        pad_image_flag = False
-
-        return image_t, boxes_t, landms_t, pad_image_flag
-    return image, boxes, labels, landm, pad_image_flag
-
-
-def _distort(image):
-
-    def _convert(image, alpha=1, beta=0):
-        tmp = image.astype(float) * alpha + beta
-        tmp[tmp < 0] = 0
-        tmp[tmp > 255] = 255
-        image[:] = tmp
-
-    image = image.copy()
-
-    if random.randrange(2):
-
-        #brightness distortion
-        if random.randrange(2):
-            _convert(image, beta=random.uniform(-32, 32))
-
-        #contrast distortion
-        if random.randrange(2):
-            _convert(image, alpha=random.uniform(0.5, 1.5))
-
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-        #saturation distortion
-        if random.randrange(2):
-            _convert(image[:, :, 1], alpha=random.uniform(0.5, 1.5))
-
-        #hue distortion
-        if random.randrange(2):
-            tmp = image[:, :, 0].astype(int) + random.randint(-18, 18)
-            tmp %= 180
-            image[:, :, 0] = tmp
-
-        image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)
-
+            annot_padded = torch.ones((len(annots), max_num_annots, 4)) * -1
+            for idx, annot in enumerate(annots):
+                if annot.shape[0] > 0:
+                    annot_padded[idx, :annot.shape[0], :] = annot
     else:
+        if annots[0].shape[1] > 4:
+            annot_padded = torch.ones((len(annots), 1, 14)) * -1
+        else:
+            annot_padded = torch.ones((len(annots), 1, 4)) * -1
 
-        #brightness distortion
-        if random.randrange(2):
-            _convert(image, beta=random.uniform(-32, 32))
+    batched_imgs = batched_imgs.permute(0, 3, 1, 2)
 
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-        #saturation distortion
-        if random.randrange(2):
-            _convert(image[:, :, 1], alpha=random.uniform(0.5, 1.5))
-
-        #hue distortion
-        if random.randrange(2):
-            tmp = image[:, :, 0].astype(int) + random.randint(-18, 18)
-            tmp %= 180
-            image[:, :, 0] = tmp
-
-        image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)
-
-        #contrast distortion
-        if random.randrange(2):
-            _convert(image, alpha=random.uniform(0.5, 1.5))
-
-    return image
-
-
-def _expand(image, boxes, fill, p):
-    if random.randrange(2):
-        return image, boxes
-
-    height, width, depth = image.shape
-
-    scale = random.uniform(1, p)
-    w = int(scale * width)
-    h = int(scale * height)
-
-    left = random.randint(0, w - width)
-    top = random.randint(0, h - height)
-
-    boxes_t = boxes.copy()
-    boxes_t[:, :2] += (left, top)
-    boxes_t[:, 2:] += (left, top)
-    expand_image = np.empty(
-        (h, w, depth),
-        dtype=image.dtype)
-    expand_image[:, :] = fill
-    expand_image[top:top + height, left:left + width] = image
-    image = expand_image
-
-    return image, boxes_t
-
-
-def _mirror(image, boxes, landms):
-    _, width, _ = image.shape
-    if random.randrange(2):
-        image = image[:, ::-1]
-        boxes = boxes.copy()
-        boxes[:, 0::2] = width - boxes[:, 2::-2]
-
-        # landm
-        landms = landms.copy()
-        landms = landms.reshape([-1, 5, 2])
-        landms[:, :, 0] = width - landms[:, :, 0]
-        tmp = landms[:, 1, :].copy()
-        landms[:, 1, :] = landms[:, 0, :]
-        landms[:, 0, :] = tmp
-        tmp1 = landms[:, 4, :].copy()
-        landms[:, 4, :] = landms[:, 3, :]
-        landms[:, 3, :] = tmp1
-        landms = landms.reshape([-1, 10])
-
-    return image, boxes, landms
-
-
-def _pad_to_square(image, rgb_mean, pad_image_flag):
-    if not pad_image_flag:
-        return image
-    height, width, _ = image.shape
-    long_side = max(width, height)
-    image_t = np.empty((long_side, long_side, 3), dtype=image.dtype)
-    image_t[:, :] = rgb_mean
-    image_t[0:0 + height, 0:0 + width] = image
-    return image_t
-
-
-def _resize_subtract_mean(image, insize, rgb_mean):
-    interp_methods = [cv2.INTER_LINEAR, cv2.INTER_CUBIC, cv2.INTER_AREA, cv2.INTER_NEAREST, cv2.INTER_LANCZOS4]
-    interp_method = interp_methods[random.randrange(5)]
-    image = cv2.resize(image, (insize, insize), interpolation=interp_method)
-    image = image.astype(np.float32)
-    image -= rgb_mean
-    return image.transpose(2, 0, 1)
-
-
-class preproc(object):
-
-    def __init__(self, img_dim, rgb_means):
-        self.img_dim = img_dim
-        self.rgb_means = rgb_means
-
-    def __call__(self, image, targets):
-        assert targets.shape[0] > 0, "this image does not have gt"
-
-        boxes = targets[:, :4].copy()
-        labels = targets[:, -1].copy()
-        landm = targets[:, 4:-1].copy()
-
-        image_t, boxes_t, labels_t, landm_t, pad_image_flag = _crop(image, boxes, labels, landm, self.img_dim)
-        image_t = _distort(image_t)
-        image_t = _pad_to_square(image_t,self.rgb_means, pad_image_flag)
-        image_t, boxes_t, landm_t = _mirror(image_t, boxes_t, landm_t)
-        height, width, _ = image_t.shape
-        image_t = _resize_subtract_mean(image_t, self.img_dim, self.rgb_means)
-        boxes_t[:, 0::2] /= width
-        boxes_t[:, 1::2] /= height
-
-        landm_t[:, 0::2] /= width
-        landm_t[:, 1::2] /= height
-
-        labels_t = np.expand_dims(labels_t, 1)
-        targets_t = np.hstack((boxes_t, landm_t, labels_t))
-
-        return image_t, targets_t
+    return {'img': batched_imgs, 'annot': annot_padded}
 
 
 
-class WiderFaceDetection(Dataset):
-    def __init__(self, txt_path, preproc=None):
+class TrainDataset(Dataset):
+    def __init__(self, txt_path, transform=None):
 
-        self.preproc = preproc
         self.imgs_path = []
         self.words = []
+        self.transform = transform
 
         with open(txt_path, 'r') as f:
             lines = f.readlines()
@@ -297,6 +74,7 @@ class WiderFaceDetection(Dataset):
                 line = line.split(' ')
                 label = [float(x) for x in line]
                 labels.append(label)
+
         self.words.append(labels)
 
     def __len__(self):
@@ -306,42 +84,208 @@ class WiderFaceDetection(Dataset):
     def __getitem__(self, index):
 
         img = cv2.imread(self.imgs_path[index])
-        height, width, _ = img.shape
-
         labels = self.words[index]
-        annotations = np.zeros((0, 15))
+
+        annotations = np.zeros((0, 14))
+
         if len(labels) == 0:
             return annotations
 
         for idx, label in enumerate(labels):
-            annotation = np.zeros((1, 15))
+            annotation = np.zeros((1, 14))
+            # bboxes
+            annotation[0, 0] = label[0]  # x1
+            annotation[0, 1] = label[1]  # y1
+            annotation[0, 2] = label[0] + label[2]  # x2
+            annotation[0, 3] = label[1] + label[3]  # y2
+            # landmarks
+            annotation[0, 4] = label[4]  # l0_x
+            annotation[0, 5] = label[5]  # l0_y
+            annotation[0, 6] = label[7]  # l1_x
+            annotation[0, 7] = label[8]  # l1_y
+            annotation[0, 8] = label[10]  # l2_x
+            annotation[0, 9] = label[11]  # l2_y
+            annotation[0, 10] = label[13]  # l3_x
+            annotation[0, 11] = label[14]  # l3_y
+            annotation[0, 12] = label[16]  # l4_x
+            annotation[0, 13] = label[17]  # l4_y
+
+            annotations = np.append(annotations, annotation, axis=0)
+
+        sample = {'img': img, 'annot': annotations}
+        if self.transform is not None:
+            sample = self.transform(sample)
+
+        return sample
+
+
+
+class RandomCroper(object):
+    def __call__(self, sample, input_size=640):
+
+        image, annots = sample['img'], sample['annot']
+        rows, cols, _ = image.shape
+
+        smallest_side = min(rows, cols)
+        longest_side = max(rows, cols)
+        scale = random.uniform(0.3, 1)
+        short_size = int(smallest_side * scale)
+        start_short_upscale = smallest_side - short_size
+        start_long_upscale = longest_side - short_size
+        crop_short = random.randint(0, start_short_upscale)
+        crop_long = random.randint(0, start_long_upscale)
+
+        if smallest_side == rows:
+            crop_y = crop_short
+            crop_x = crop_long
+        else:
+            crop_x = crop_short
+            crop_y = crop_long
+        # crop
+        cropped_img = image[crop_y:crop_y + short_size, crop_x:crop_x + short_size]
+        # resize
+        new_image = cv2.resize(cropped_img, (input_size, input_size))
+
+        # relocate bbox
+        annots[:, 0] = annots[:, 0] - crop_x
+        annots[:, 1] = annots[:, 1] - crop_y
+        annots[:, 2] = annots[:, 2] - crop_x
+        annots[:, 3] = annots[:, 3] - crop_y
+
+        # relocate landmarks
+        if annots.shape[1] > 4:
+            # l_mask = annots[:,4]!=-1
+            l_mask = annots[:, 4] > 0
+            annots[l_mask, 4] = annots[l_mask, 4] - crop_x
+            annots[l_mask, 5] = annots[l_mask, 5] - crop_y
+            annots[l_mask, 6] = annots[l_mask, 6] - crop_x
+            annots[l_mask, 7] = annots[l_mask, 7] - crop_y
+            annots[l_mask, 8] = annots[l_mask, 8] - crop_x
+            annots[l_mask, 9] = annots[l_mask, 9] - crop_y
+            annots[l_mask, 10] = annots[l_mask, 10] - crop_x
+            annots[l_mask, 11] = annots[l_mask, 11] - crop_y
+            annots[l_mask, 12] = annots[l_mask, 12] - crop_x
+            annots[l_mask, 13] = annots[l_mask, 13] - crop_y
+
+        # scale annotations
+        resize_scale = input_size / short_size
+        annots[:, :4] = annots[:, :4] * resize_scale
+        if annots.shape[1] > 4:
+            annots[l_mask, 4:] = annots[l_mask, 4:] * resize_scale
+
+        # remove faces center not in image afer crop
+        center_x = (annots[:, 0] + annots[:, 2]) / 2
+        center_y = (annots[:, 1] + annots[:, 3]) / 2
+
+        mask_x = (center_x[:, ] > 0) & (center_x[:, ] < input_size)
+        mask_y = (center_y[:, ] > 0) & (center_y[:, ] < input_size)
+
+        mask = mask_x & mask_y
+
+        # clip bbox
+        annots[:, :4] = annots[:, :4].clip(0, input_size)
+
+        # clip landmarks
+        if annots.shape[1] > 4:
+            annots[l_mask, 4:] = annots[l_mask, 4:].clip(0, input_size)
+
+        annots = annots[mask]
+
+        return {'img': torch.from_numpy(new_image), 'annot': torch.from_numpy(annots)}
+
+
+
+class RandomFlip(object):
+    def __call__(self, sample, input_size=640, flip_x=0.5):
+
+        if random.random() < flip_x:
+            image, annots = sample['img'], sample['annot']
+
+            # flip image
+            image = torch.flip(image, [1])
+            image = image.numpy()
+            annots = annots.numpy()
+            # relocate bboxes
+            x1 = annots[:, 0].copy()
+            x2 = annots[:, 2].copy()
+            x_tmp = x1.copy()
+            annots[:, 0] = input_size - x2
+            annots[:, 2] = input_size - x_tmp
+            # relocate landmarks
+            l_mask = annots[:, 4] > 0
+            annots[l_mask, 4::2] = input_size - annots[l_mask, 4::2]
+            l_tmp = annots.copy()
+            annots[l_mask, 4:6] = l_tmp[l_mask, 6:8]
+            annots[l_mask, 6:8] = l_tmp[l_mask, 4:6]
+            annots[l_mask, 10:12] = l_tmp[l_mask, 12:]
+            annots[l_mask, 12:] = l_tmp[l_mask, 10:12]
+
+            image = torch.from_numpy(image)
+            annots = torch.from_numpy(annots)
+
+            sample = {'img': image, 'annot': annots}
+
+        return sample
+
+
+
+class ValidDataset(Dataset):
+    def __init__(self, txt_path, transform=None):
+
+        self.imgs_path = []
+        self.words = []
+        self.transform = transform
+
+        with open(txt_path, 'r') as f:
+            lines = f.readlines()
+
+        isFirst = True
+        labels = []
+        for line in lines:
+            line = line.rstrip()
+            if line.startswith('#'):
+                if isFirst is True:
+                    isFirst = False
+                else:
+                    labels_copy = labels.copy()
+                    self.words.append(labels_copy)
+                    labels.clear()
+                path = line[2:]
+                path = txt_path.replace('label.txt', 'images/') + path
+                self.imgs_path.append(path)
+            else:
+                line = line.split(' ')
+                label = [float(x) for x in line]
+                labels.append(label)
+
+        self.words.append(labels)
+
+    def __getitem__(self, index):
+
+        img = cv2.imread(self.imgs_path[index])
+        labels = self.words[index]
+
+        annotations = np.zeros((0, 4))
+
+        if len(labels) == 0:
+            return annotations
+
+        for idx, label in enumerate(labels):
+            annotation = np.zeros((1, 4))
             # bbox
             annotation[0, 0] = label[0]  # x1
             annotation[0, 1] = label[1]  # y1
             annotation[0, 2] = label[0] + label[2]  # x2
             annotation[0, 3] = label[1] + label[3]  # y2
 
-            # landmarks
-            annotation[0, 4] = label[4]    # l0_x
-            annotation[0, 5] = label[5]    # l0_y
-            annotation[0, 6] = label[7]    # l1_x
-            annotation[0, 7] = label[8]    # l1_y
-            annotation[0, 8] = label[10]   # l2_x
-            annotation[0, 9] = label[11]   # l2_y
-            annotation[0, 10] = label[13]  # l3_x
-            annotation[0, 11] = label[14]  # l3_y
-            annotation[0, 12] = label[16]  # l4_x
-            annotation[0, 13] = label[17]  # l4_y
-            # label
-            if (annotation[0, 4] < 0):
-                annotation[0, 14] = -1
-            else:
-                annotation[0, 14] = 1
-            # merge
             annotations = np.append(annotations, annotation, axis=0)
 
-        target = np.array(annotations)
-        if self.preproc is not None:
-            img, target = self.preproc(img, target)
+        sample = {'img': img, 'annot': annotations}
+        if self.transform is not None:
+            sample = self.transform(sample)
 
-        return torch.from_numpy(img), target
+        return sample
+
+    def __len__(self):
+
+        return len(self.imgs_path)

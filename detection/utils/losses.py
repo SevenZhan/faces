@@ -1,128 +1,163 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from utils.utils import match, log_sum_exp
-from config import cfg_mnet
-GPU = cfg_mnet['gpu_train']
+from torchvision.ops.boxes import box_iou
 
 
 
-class MultiBoxLoss(nn.Module):
-    """SSD Weighted Loss Function
-    Compute Targets:
-        1) Produce Confidence Target Indices by matching  ground truth boxes
-           with (default) 'priorboxes' that have jaccard index > threshold parameter
-           (default threshold: 0.5).
-        2) Produce localization target by 'encoding' variance into offsets of ground
-           truth boxes and their matched  'priorboxes'.
-        3) Hard negative mining to filter the excessive number of negative examples
-           that comes with using a large number of default bounding boxes.
-           (default negative:positive ratio 3:1)
-    Objective Loss:
-        L(x,c,l,g) = (Lconf(x, c) + αLloc(x,l,g)) / N
-        Where, Lconf is the CrossEntropy Loss and Lloc is the SmoothL1 Loss
-        weighted by α which is set to 1 by cross val.
-        Args:
-            c: class confidences,
-            l: predicted boxes,
-            g: ground truth boxes
-            N: number of matched default boxes
-        See: https://arxiv.org/pdf/1512.02325.pdf for more details.
-    """
-
-    def __init__(self, num_classes, overlap_thresh, prior_for_matching, bkg_label, neg_mining, neg_pos, neg_overlap, encode_target):
+class DetectionLosses(nn.Module):
+    def __init__(self, lmd1=0.25, lmd2=0.1):
         super().__init__()
 
-        self.num_classes = num_classes
-        self.threshold = overlap_thresh
-        self.background_label = bkg_label
-        self.encode_target = encode_target
-        self.use_prior_for_matching = prior_for_matching
-        self.do_neg_mining = neg_mining
-        self.negpos_ratio = neg_pos
-        self.neg_overlap = neg_overlap
-        self.variance = [0.1, 0.2]
+        self.smoothl1 = nn.SmoothL1Loss()
+        self.centropy = nn.CrossEntropyLoss(reduction='none')
+        self.lmd1 = lmd1
+        self.lmd2 = lmd2
 
-    def forward(self, predictions, priors, targets):
-        """Multibox Loss
-        Args:
-            predictions (tuple): A tuple containing loc preds, conf preds,
-            and prior boxes from SSD net.
-                conf shape: torch.size(batch_size,num_priors,num_classes)
-                loc shape: torch.size(batch_size,num_priors,4)
-                priors shape: torch.size(num_priors,4)
+    def forward(self, classifications, bbox_regressions, ldm_regressions, anchors, annotations):
 
-            ground_truth (tensor): Ground truth boxes and labels for a batch,
-                shape: [batch_size,num_objs,5] (last idx is the label).
-        """
+        device = classifications.device
+        batch_size = classifications.shape[0]
+        classification_losses = []
+        bbox_regression_losses = []
+        ldm_regression_losses = []
 
-        loc_data, conf_data, landm_data = predictions
-        priors = priors
-        num = loc_data.size(0)
-        num_priors = (priors.size(0))
+        anchor = anchors[0, :, :]
+        anchor_widths = anchor[:, 2] - anchor[:, 0]
+        anchor_heights = anchor[:, 3] - anchor[:, 1]
+        anchor_ctr_x = anchor[:, 0] + 0.5 * anchor_widths
+        anchor_ctr_y = anchor[:, 1] + 0.5 * anchor_heights
 
-        # match priors (default boxes) and ground truth boxes
-        loc_t = torch.Tensor(num, num_priors, 4)
-        landm_t = torch.Tensor(num, num_priors, 10)
-        conf_t = torch.LongTensor(num, num_priors)
-        for idx in range(num):
-            truths = targets[idx][:, :4].data
-            labels = targets[idx][:, -1].data
-            landms = targets[idx][:, 4:14].data
-            defaults = priors.data
-            match(self.threshold, truths, defaults, self.variance, labels, landms, loc_t, conf_t, landm_t, idx)
-        if GPU:
-            loc_t = loc_t.cuda()
-            conf_t = conf_t.cuda()
-            landm_t = landm_t.cuda()
+        for j in range(batch_size):
+            classification = classifications[j, :, :]
+            bbox_regression = bbox_regressions[j, :, :]
+            ldm_regression = ldm_regressions[j, :, :]
 
-        zeros = torch.tensor(0).cuda()
-        # landm Loss (Smooth L1)
-        # Shape: [batch,num_priors,10]
-        pos1 = conf_t > zeros
-        num_pos_landm = pos1.long().sum(1, keepdim=True)
-        N1 = max(num_pos_landm.data.sum().float(), 1)
-        pos_idx1 = pos1.unsqueeze(pos1.dim()).expand_as(landm_data)
-        landm_p = landm_data[pos_idx1].view(-1, 10)
-        landm_t = landm_t[pos_idx1].view(-1, 10)
-        loss_landm = F.smooth_l1_loss(landm_p, landm_t, reduction='sum')
+            annotation = annotations[j, :, :]
+            annotation = annotation[annotation[:, 0] > 0]
+            bbox_annotation = annotation[:, :4]
+            ldm_annotation = annotation[:, 4:]
 
+            if bbox_annotation.shape[0] == 0:
+                bbox_regression_losses.append(torch.tensor(0., requires_grad=True, device=device))
+                classification_losses.append(torch.tensor(0., requires_grad=True, device=device))
+                ldm_regression_losses.append(torch.tensor(0., requires_grad=True, device=device))
+                continue
 
-        pos = conf_t != zeros
-        conf_t[pos] = 1
+            # IoU betweens anchors and annotations
+            IoU = box_iou(anchor, bbox_annotation)
+            IoU_max, IoU_argmax = torch.max(IoU, dim=1)
 
-        # Localization Loss (Smooth L1)
-        # Shape: [batch,num_priors,4]
-        pos_idx = pos.unsqueeze(pos.dim()).expand_as(loc_data)
-        loc_p = loc_data[pos_idx].view(-1, 4)
-        loc_t = loc_t[pos_idx].view(-1, 4)
-        loss_l = F.smooth_l1_loss(loc_p, loc_t, reduction='sum')
+            targets = torch.ones_like(classification) * -1
+            # those whose iou<0.3 have no object
+            negative_indices = torch.lt(IoU_max, 0.3)
+            targets[negative_indices, :] = 0
+            targets[negative_indices, 1] = 1
+            # those whose iou>0.5 have object
+            positive_indices = torch.ge(IoU_max, 0.5)
+            targets[positive_indices, :] = 0
+            targets[positive_indices, 0] = 1
+            # keep positive and negative ratios with 1:3
+            num_positive_anchors = positive_indices.sum()
+            keep_negative_anchors = num_positive_anchors * 3
 
-        # Compute max conf across batch for hard negative mining
-        batch_conf = conf_data.view(-1, self.num_classes)
-        loss_c = log_sum_exp(batch_conf) - batch_conf.gather(1, conf_t.view(-1, 1))
+            bbox_assigned_annotations = bbox_annotation[IoU_argmax, :]
+            ldm_assigned_annotations = ldm_annotation[IoU_argmax, :]
+            ldm_sum = ldm_assigned_annotations.sum(dim=1)
+            ge0_mask = ldm_sum > 0
+            ldm_positive_indices = ge0_mask & positive_indices
+            # OHEM
+            # negative_losses = classification[negative_indices, 1] * -1
+            negative_losses = self.centropy(classification[negative_indices], targets[negative_indices].argmax(dim=1))
+            sorted_losses, _ = torch.sort(negative_losses, descending=True)
+            if sorted_losses.numel() > keep_negative_anchors:
+                sorted_losses = sorted_losses[:keep_negative_anchors]
+            # positive_losses = classification[positive_indices, 0] * -1
+            positive_losses = self.centropy(classification[positive_indices], targets[positive_indices].argmax(dim=1))
+            # focal loss
+            focal_loss = False
+            if focal_loss:
+                alpha = 0.25
+                gamma = 2.0
 
-        # Hard Negative Mining
-        loss_c[pos.view(-1, 1)] = 0 # filter out pos boxes for now
-        loss_c = loss_c.view(num, -1)
-        _, loss_idx = loss_c.sort(1, descending=True)
-        _, idx_rank = loss_idx.sort(1)
-        num_pos = pos.long().sum(1, keepdim=True)
-        num_neg = torch.clamp(self.negpos_ratio*num_pos, max=pos.size(1)-1)
-        neg = idx_rank < num_neg.expand_as(idx_rank)
+                alpha_factor = torch.ones_like(targets) * alpha
+                alpha_factor = torch.where(torch.eq(targets, 1.), alpha_factor, 1. - alpha_factor)
+                focal_weight = torch.where(torch.eq(targets, 1.), 1. - classification, classification)
+                focal_weight = alpha_factor * torch.pow(focal_weight, gamma)
 
-        # Confidence Loss Including Positive and Negative Examples
-        pos_idx = pos.unsqueeze(2).expand_as(conf_data)
-        neg_idx = neg.unsqueeze(2).expand_as(conf_data)
-        conf_p = conf_data[(pos_idx+neg_idx).gt(0)].view(-1,self.num_classes)
-        targets_weighted = conf_t[(pos+neg).gt(0)]
-        loss_c = F.cross_entropy(conf_p, targets_weighted, reduction='sum')
+                bce = -(targets * torch.log(classification) + (1.0 - targets) * torch.log(1.0 - classification))
+                cls_loss = focal_weight * bce
+                cls_loss = torch.where(torch.ne(targets, -1.0), cls_loss, torch.zeros_like(cls_loss))
+                classification_losses.append(cls_loss.sum() / torch.clamp(num_positive_anchors.float(), min=1.0))
+            else:
+                if positive_indices.sum() > 0:
+                    classification_losses.append(positive_losses.mean() + sorted_losses.mean())
+                else:
+                    classification_losses.append(torch.tensor(0., requires_grad=True, device=device))
 
-        # Sum of losses: L(x,c,l,g) = (Lconf(x, c) + αLloc(x,l,g)) / N
-        N = max(num_pos.data.sum().float(), 1)
-        loss_l /= N
-        loss_c /= N
-        loss_landm /= N1
+            # compute bboxes loss
+            if positive_indices.sum() > 0:
+                # bbox
+                anchor_widths_pi = anchor_widths[positive_indices]
+                anchor_heights_pi = anchor_heights[positive_indices]
+                anchor_ctr_x_pi = anchor_ctr_x[positive_indices]
+                anchor_ctr_y_pi = anchor_ctr_y[positive_indices]
 
-        return loss_l, loss_c, loss_landm
+                bbox_assigned_annotations = bbox_assigned_annotations[positive_indices, :]
+                gt_widths = bbox_assigned_annotations[:, 2] - bbox_assigned_annotations[:, 0]
+                gt_heights = bbox_assigned_annotations[:, 3] - bbox_assigned_annotations[:, 1]
+                gt_ctr_x = bbox_assigned_annotations[:, 0] + 0.5 * gt_widths
+                gt_ctr_y = bbox_assigned_annotations[:, 1] + 0.5 * gt_heights
+
+                targets_dx = (gt_ctr_x - anchor_ctr_x_pi) / (anchor_widths_pi + 1e-14)
+                targets_dy = (gt_ctr_y - anchor_ctr_y_pi) / (anchor_heights_pi + 1e-14)
+                targets_dw = torch.log(gt_widths / anchor_widths_pi)
+                targets_dh = torch.log(gt_heights / anchor_heights_pi)
+
+                bbox_targets = torch.stack((targets_dx, targets_dy, targets_dw, targets_dh))
+                bbox_targets = bbox_targets.t()
+                # Rescale
+                bbox_targets = bbox_targets / torch.tensor([[0.1, 0.1, 0.2, 0.2]], device=device)
+
+                # smooth L1 box losses
+                bbox_regression_loss = self.smoothl1(bbox_targets, bbox_regression[positive_indices, :])
+                bbox_regression_losses.append(bbox_regression_loss)
+            else:
+                bbox_regression_losses.append(torch.tensor(0., requires_grad=True, device=device))
+
+            # compute landmarks loss
+            if ldm_positive_indices.sum() > 0:
+                ldm_assigned_annotations = ldm_assigned_annotations[ldm_positive_indices, :]
+
+                anchor_widths_l = anchor_widths[ldm_positive_indices]
+                anchor_heights_l = anchor_heights[ldm_positive_indices]
+                anchor_ctr_x_l = anchor_ctr_x[ldm_positive_indices]
+                anchor_ctr_y_l = anchor_ctr_y[ldm_positive_indices]
+
+                l0_x = (ldm_assigned_annotations[:, 0] - anchor_ctr_x_l) / (anchor_widths_l + 1e-14)
+                l0_y = (ldm_assigned_annotations[:, 1] - anchor_ctr_y_l) / (anchor_heights_l + 1e-14)
+                l1_x = (ldm_assigned_annotations[:, 2] - anchor_ctr_x_l) / (anchor_widths_l + 1e-14)
+                l1_y = (ldm_assigned_annotations[:, 3] - anchor_ctr_y_l) / (anchor_heights_l + 1e-14)
+                l2_x = (ldm_assigned_annotations[:, 4] - anchor_ctr_x_l) / (anchor_widths_l + 1e-14)
+                l2_y = (ldm_assigned_annotations[:, 5] - anchor_ctr_y_l) / (anchor_heights_l + 1e-14)
+                l3_x = (ldm_assigned_annotations[:, 6] - anchor_ctr_x_l) / (anchor_widths_l + 1e-14)
+                l3_y = (ldm_assigned_annotations[:, 7] - anchor_ctr_y_l) / (anchor_heights_l + 1e-14)
+                l4_x = (ldm_assigned_annotations[:, 8] - anchor_ctr_x_l) / (anchor_widths_l + 1e-14)
+                l4_y = (ldm_assigned_annotations[:, 9] - anchor_ctr_y_l) / (anchor_heights_l + 1e-14)
+
+                ldm_targets = torch.stack((l0_x, l0_y, l1_x, l1_y, l2_x, l2_y, l3_x, l3_y, l4_x, l4_y))
+                ldm_targets = ldm_targets.t()
+                # Rescale
+                scale = torch.ones(1, 10, device=device) * 0.1
+                ldm_targets = ldm_targets / scale
+
+                ldm_regression_loss = self.smoothl1(ldm_targets, ldm_regression[ldm_positive_indices, :])
+                ldm_regression_losses.append(ldm_regression_loss)
+            else:
+                ldm_regression_losses.append(torch.tensor(0., requires_grad=True).cuda())
+
+        batch_cls_losses = torch.stack(classification_losses).mean()
+        batch_box_losses = torch.stack(bbox_regression_losses).mean()
+        batch_lmk_losses = torch.stack(ldm_regression_losses).mean()
+        losses = batch_cls_losses + self.lmd1*batch_box_losses + self.lmd2*batch_lmk_losses
+
+        return losses

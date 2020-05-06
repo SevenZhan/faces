@@ -1,3 +1,5 @@
-from .retinaface import RetinaFace
+from .retina import Retina
 
-__all__ = ['RetinaFace']
+
+
+__all__ = ['Retina']

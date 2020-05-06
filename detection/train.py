@@ -1,161 +1,60 @@
 import os
-import math
-import time
-import datetime
 import argparse
+import numpy as np
 
 import torch
-import torch.optim as optim
-import torch.backends.cudnn as cudnn
+from torch import optim
 from torch.utils.data import DataLoader
+from torchvision import transforms
 
-from models import RetinaFace
-from config import cfg_mnet, cfg_re50
-from utils import MultiBoxLoss, Anchor, WiderFaceDetection, preproc, detection_collate
-
-
-
-parser = argparse.ArgumentParser(description='Retinaface Training')
-parser.add_argument('--training_dataset', default='./data/widerface/train/label.txt', help='Training dataset directory')
-parser.add_argument('--network', default='mobile0.25', help='Backbone network mobile0.25 or resnet50')
-parser.add_argument('--num_workers', default=4, type=int, help='Number of workers used in dataloading')
-parser.add_argument('--lr', '--learning-rate', default=1e-3, type=float, help='initial learning rate')
-parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
-parser.add_argument('--resume_net', default=None, help='resume net for retraining')
-parser.add_argument('--resume_epoch', default=0, type=int, help='resume iter for retraining')
-parser.add_argument('--weight_decay', default=5e-4, type=float, help='Weight decay for SGD')
-parser.add_argument('--gamma', default=0.1, type=float, help='Gamma update for SGD')
-parser.add_argument('--save_folder', default='./weights/', help='Location to save checkpoint models')
-args = parser.parse_args()
-
-if not os.path.exists(args.save_folder):
-    os.mkdir(args.save_folder)
-cfg = None
-if args.network == "mobile0.25":
-    cfg = cfg_mnet
-elif args.network == "resnet50":
-    cfg = cfg_re50
-
-rgb_mean = (104, 117, 123) # bgr order
-num_classes = 2
-img_dim = cfg['image_size']
-num_gpu = cfg['ngpu']
-batch_size = cfg['batch_size']
-max_epoch = cfg['epoch']
-gpu_train = cfg['gpu_train']
-
-num_workers = args.num_workers
-momentum = args.momentum
-weight_decay = args.weight_decay
-initial_lr = args.lr
-gamma = args.gamma
-training_dataset = args.training_dataset
-save_folder = args.save_folder
-
-net = RetinaFace(cfg=cfg)
-print("Printing net...")
-print(net)
-
-if args.resume_net is not None:
-    print('Loading resume network...')
-    state_dict = torch.load(args.resume_net)
-    # create new OrderedDict that does not contain `module.`
-    from collections import OrderedDict
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        head = k[:7]
-        if head == 'module.':
-            name = k[7:] # remove `module.`
-        else:
-            name = k
-        new_state_dict[name] = v
-    net.load_state_dict(new_state_dict)
-
-if num_gpu > 1 and gpu_train:
-    net = torch.nn.DataParallel(net).cuda()
-else:
-    net = net.cuda()
-
-cudnn.benchmark = True
+from models import Retina
+from valid import evaluate
+from utils import TrainDataset, ValidDataset, RandomCroper, RandomFlip, collater, DetectionLosses, WarmupLR
 
 
-optimizer = optim.SGD(net.parameters(), lr=initial_lr, momentum=momentum, weight_decay=weight_decay)
-criterion = MultiBoxLoss(num_classes, 0.35, True, 0, True, 7, 0.35, False)
 
-Anchor = Anchor(cfg, image_size=(img_dim, img_dim))
-with torch.no_grad():
-    priors = Anchor.forward()
-    priors = priors.cuda()
+# config
+SEED = 2334
+torch.manual_seed(SEED)
+np.random.seed(SEED)
 
-def train():
-    net.train()
-    epoch = 0 + args.resume_epoch
-    print('Loading Dataset...')
+parser = argparse.ArgumentParser()
+parser.add_argument('-r', '--root', type=str, default='wildface', help='root path for training/validation sets')
+parser.add_argument('-a', '--arch', type=str, default='resnet50', help='network archtecture to use')
+parser.add_argument('-b', '--batch', type=int, default=256, help='batch size to use for trianset/validset')
+parser.add_argument('-w', '--worker', type=int, default=4, help='number of workers to use for dataloader')
+parser.add_argument('-s', '--states', type=str, default='states', help='path to save model state dicts')
+opt = parser.parse_args()
 
-    dataset = WiderFaceDetection(training_dataset, preproc(img_dim, rgb_mean))
 
-    epoch_size = math.ceil(len(dataset) / batch_size)
-    max_iter = max_epoch * epoch_size
 
-    stepvalues = (cfg['decay1'] * epoch_size, cfg['decay2'] * epoch_size)
-    step_index = 0
+# data preprocessing
+train_set = TrainDataset(os.path.join(opt.root, 'train', 'label.txt'), transform=transforms.Compose([RandomCroper(), RandomFlip()]))
+train_loader = DataLoader(train_set, batch_size=opt.batch, num_workers=opt.worker, collate_fn=collater, shuffle=True, drop_last=True, pin_memory=True)
+valid_set = ValidDataset(os.path.join(opt.root, 'valid', 'label.txt'), transform=transforms.Compose([RandomCroper(), RandomFlip()]))
+valid_loader = DataLoader(valid_set, batch_size=opt.batch, num_workers=opt.worker, collate_fn=collater, shuffle=True, drop_last=True, pin_memory=True)
 
-    if args.resume_epoch > 0:
-        start_iter = args.resume_epoch * epoch_size
-    else:
-        start_iter = 0
 
-    for iteration in range(start_iter, max_iter):
-        if iteration % epoch_size == 0:
-            # create batch iterator
-            batch_iterator = iter(DataLoader(dataset, batch_size, shuffle=True, num_workers=num_workers, collate_fn=detection_collate))
-            if (epoch % 10 == 0 and epoch > 0) or (epoch % 5 == 0 and epoch > cfg['decay1']):
-                torch.save(net.state_dict(), save_folder + cfg['name'] + '_epoch_' + str(epoch) + '.pth')
-            epoch += 1
 
-        load_t0 = time.time()
-        if iteration in stepvalues:
-            step_index += 1
-        lr = adjust_learning_rate(optimizer, gamma, epoch, step_index, iteration, epoch_size)
+# modeling
+model = Retina()
+loss_fn = DetectionLosses()
+optm_fn = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=5e-4)
+scheduler = WarmupLR(optm_fn, [15, 20], warmup=5)
 
-        # load train data
-        images, targets = next(batch_iterator)
-        images = images.cuda()
-        targets = [anno.cuda() for anno in targets]
 
-        # forward
-        out = net(images)
 
-        # backprop
-        optimizer.zero_grad()
-        loss_l, loss_c, loss_landm = criterion(out, priors, targets)
-        loss = cfg['loc_weight'] * loss_l + loss_c + loss_landm
+# training
+epochs = 25
+
+for epoch in range(epochs):
+    for iter, batch in enumerate(train_loader):
+        imgs, annotations = batch
+        classifications, bboxes, lmarks = model(imgs)
+        loss = loss_fn(classifications, bboxes, lmarks, model.anchors, annotations)
         loss.backward()
-        optimizer.step()
-        load_t1 = time.time()
-        batch_time = load_t1 - load_t0
-        eta = int(batch_time * (max_iter - iteration))
-        print('Epoch:{}/{} || Epochiter: {}/{} || Iter: {}/{} || Loc: {:.4f} Cla: {:.4f} Landm: {:.4f} || LR: {:.8f} || Batchtime: {:.4f} s || ETA: {}'
-              .format(epoch, max_epoch, (iteration % epoch_size) + 1,
-              epoch_size, iteration + 1, max_iter, loss_l.item(), loss_c.item(), loss_landm.item(), lr, batch_time, str(datetime.timedelta(seconds=eta))))
-
-    torch.save(net.state_dict(), save_folder + cfg['name'] + '_Final.pth')
-    # torch.save(net.state_dict(), save_folder + 'Final_Retinaface.pth')
-
-
-def adjust_learning_rate(optimizer, gamma, epoch, step_index, iteration, epoch_size):
-    """Sets the learning rate
-    # Adapted from PyTorch Imagenet example:
-    # https://github.com/pytorch/examples/blob/master/imagenet/main.py
-    """
-    warmup_epoch = -1
-    if epoch <= warmup_epoch:
-        lr = 1e-6 + (initial_lr-1e-6) * iteration / (epoch_size * warmup_epoch)
-    else:
-        lr = initial_lr * (gamma ** (step_index))
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-    return lr
-
-if __name__ == '__main__':
-    train()
+        optm_fn.zero_grad()
+        optm_fn.step()
+    scheduler.step()
+    recall, precision = evaluate(valid_loader, model)
+    torch.save(model.state_dict(), opt.states + '/epoch={}_recall={:.02f}_precision={:.02f}.pth'.format(epoch+1, recall, precision))

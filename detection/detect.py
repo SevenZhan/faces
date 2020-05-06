@@ -1,160 +1,40 @@
 import cv2
-import time
-import argparse
 import numpy as np
 
 import torch
-from torchvision.ops import nms
-import torch.backends.cudnn as cudnn
 
-from models import RetinaFace
-from config import cfg_mnet, cfg_re50
-from utils import Anchor, decode, decode_landm
+from models import Retina
+from valid import get_detections
 
 
 
-parser = argparse.ArgumentParser(description='Retinaface')
-parser.add_argument('-m', '--trained_model', default='./weights/Resnet50_Final.pth',
-                    type=str, help='Trained state_dict file path to open')
-parser.add_argument('--network', default='resnet50', help='Backbone network mobile0.25 or resnet50')
-parser.add_argument('--cpu', action="store_true", default=True, help='Use cpu inference')
-parser.add_argument('--confidence_threshold', default=0.02, type=float, help='confidence_threshold')
-parser.add_argument('--top_k', default=5000, type=int, help='top_k')
-parser.add_argument('--nms_threshold', default=0.4, type=float, help='nms_threshold')
-parser.add_argument('--keep_top_k', default=750, type=int, help='keep_top_k')
-parser.add_argument('-s', '--save_image', action="store_true", default=True, help='show detection results')
-parser.add_argument('--vis_thres', default=0.6, type=float, help='visualization_threshold')
-args = parser.parse_args()
+checkpoint = ''
+model = Retina()
+model.load_state_dict(torch.load(checkpoint, map_location='cpu'))
+model.eval()
 
 
-def check_keys(model, pretrained_state_dict):
 
-    ckpt_keys = set(pretrained_state_dict.keys())
-    model_keys = set(model.state_dict().keys())
-    used_pretrained_keys = model_keys & ckpt_keys
-    unused_pretrained_keys = ckpt_keys - model_keys
-    missing_keys = model_keys - ckpt_keys
-    print('Missing keys:{}'.format(len(missing_keys)))
-    print('Unused checkpoint keys:{}'.format(len(unused_pretrained_keys)))
-    print('Used keys:{}'.format(len(used_pretrained_keys)))
-    assert len(used_pretrained_keys) > 0, 'load NONE from pretrained checkpoint'
+# Read image
+img = cv2.imread('')
+img = torch.from_numpy(img)
+img = img.permute(2, 0, 1)
+input_img = img.unsqueeze(0).float()
+picked_boxes, picked_landmarks, picked_scores = get_detections(input_img, model, score_threshold=0.5, iou_threshold=0.3)
 
-    return True
+np_img = img.cpu().permute(1, 2, 0).numpy()
+np_img.astype(int)
+img = cv2.cvtColor(np_img.astype(np.uint8), cv2.COLOR_BGR2RGB)
 
+for j, boxes in enumerate(picked_boxes):
+    if boxes is not None:
+        for box, landmark, score in zip(boxes, picked_landmarks[j], picked_scores[j]):
+            cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), thickness=2)
+            cv2.circle(img, (landmark[0], landmark[1]), radius=1, color=(0, 0, 255), thickness=2)
+            cv2.circle(img, (landmark[2], landmark[3]), radius=1, color=(0, 255, 0), thickness=2)
+            cv2.circle(img, (landmark[4], landmark[5]), radius=1, color=(255, 0, 0), thickness=2)
+            cv2.circle(img, (landmark[6], landmark[7]), radius=1, color=(0, 255, 255), thickness=2)
+            cv2.circle(img, (landmark[8], landmark[9]), radius=1, color=(255, 255, 0), thickness=2)
+            cv2.putText(img, text=str(score.item())[:5], org=(box[0], box[1]), fontFace=cv2.FONT_HERSHEY_DUPLEX, thickness=1, color=(255, 255, 255))
 
-def remove_prefix(state_dict, prefix):
-    ''' Old style model is stored with all names of parameters sharing common prefix 'module.' '''
-
-    print('remove prefix \'{}\''.format(prefix))
-    f = lambda x: x.split(prefix, 1)[-1] if x.startswith(prefix) else x
-
-    return {f(key): value for key, value in state_dict.items()}
-
-
-def load_model(model, pretrained_path, load_to_cpu):
-
-    print('Loading pretrained model from {}'.format(pretrained_path))
-    if load_to_cpu:
-        pretrained_dict = torch.load(pretrained_path, map_location=lambda storage, loc: storage)
-    else:
-        device = torch.cuda.current_device()
-        pretrained_dict = torch.load(pretrained_path, map_location=lambda storage, loc: storage.cuda(device))
-    if "state_dict" in pretrained_dict.keys():
-        pretrained_dict = remove_prefix(pretrained_dict['state_dict'], 'module.')
-    else:
-        pretrained_dict = remove_prefix(pretrained_dict, 'module.')
-    check_keys(model, pretrained_dict)
-    model.load_state_dict(pretrained_dict, strict=False)
-
-    return model
-
-
-if __name__ == '__main__':
-
-    torch.set_grad_enabled(False)
-    cfg = None
-    if args.network == "mobile0.25":
-        cfg = cfg_mnet
-    elif args.network == "resnet50":
-        cfg = cfg_re50
-    # net and model
-    net = RetinaFace(cfg=cfg, phase='test')
-    net = load_model(net, args.trained_model, args.cpu)
-    net.eval()
-    print('Finished loading model!')
-    print(net)
-    cudnn.benchmark = True
-    device = torch.device("cpu" if args.cpu else "cuda")
-    net = net.to(device)
-
-    resize = 1
-
-    # testing begin
-    for i in range(1):
-        image_path = 'samples/test.jpg'
-        img_raw = cv2.imread(image_path, cv2.IMREAD_COLOR)
-
-        img = np.float32(img_raw)
-
-        im_height, im_width, _ = img.shape
-        scale = torch.Tensor([img.shape[1], img.shape[0], img.shape[1], img.shape[0]])
-        img -= (104, 117, 123)
-        img = img.transpose(2, 0, 1)
-        img = torch.from_numpy(img).unsqueeze(0)
-        img = img.to(device)
-        scale = scale.to(device)
-
-        tic = time.time()
-        loc, conf, landms = net(img)  # forward pass
-        print('net forward time: {:.4f}'.format(time.time() - tic))
-
-        Anchor = Anchor(cfg, image_size=(im_height, im_width))
-        priors = Anchor.forward()
-        priors = priors.to(device)
-        prior_data = priors.data
-        boxes = decode(loc.data.squeeze(0), prior_data, cfg['variance'])
-        boxes = boxes * scale / resize
-        scores = conf.data.squeeze(0)[:, 1]
-        landms = decode_landm(landms.data.squeeze(0), prior_data, cfg['variance'])
-        scale1 = torch.Tensor([img.shape[3], img.shape[2], img.shape[3], img.shape[2],
-                               img.shape[3], img.shape[2], img.shape[3], img.shape[2],
-                               img.shape[3], img.shape[2]])
-        scale1 = scale1.to(device)
-        landms = landms * scale1 / resize
-
-        # ignore low scores
-        inds = torch.where(scores > args.confidence_threshold)[0]
-        boxes = boxes[inds]
-        landms = landms[inds]
-        scores = scores[inds]
-
-        # do NMS
-        keep = nms(boxes, scores, 0.4)
-        dets = torch.cat((boxes, scores[:, np.newaxis]), dim=-1)
-        dets = dets[keep, :]
-        landms = landms[keep]
-
-        dets = torch.cat((dets, landms), axis=-1)
-
-        # show image
-        if args.save_image:
-            for i, b in enumerate(dets):
-                if b[4] < args.vis_thres:
-                    continue
-
-                text = "{:.4f}".format(b[4])
-                b = list(map(int, b))
-                cv2.rectangle(img_raw, (b[0], b[1]), (b[2], b[3]), (0, 0, 255), 2)
-                cx = b[0]
-                cy = b[1] + 12
-                cv2.putText(img_raw, text, (cx, cy), cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 255, 255))
-
-                # landms
-                cv2.circle(img_raw, (b[5], b[6]), 1, (0, 0, 255), 4)
-                cv2.circle(img_raw, (b[7], b[8]), 1, (0, 255, 255), 4)
-                cv2.circle(img_raw, (b[9], b[10]), 1, (255, 0, 255), 4)
-                cv2.circle(img_raw, (b[11], b[12]), 1, (0, 255, 0), 4)
-                cv2.circle(img_raw, (b[13], b[14]), 1, (255, 0, 0), 4)
-            # save image
-            name = 'results/test.jpg'
-            cv2.imwrite(name, img_raw)
+cv2.imwrite('results/test.jpg', img)
