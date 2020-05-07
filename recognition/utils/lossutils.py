@@ -3,6 +3,7 @@ from torch import nn
 
 
 
+########################### Circle Loss ###########################
 class CircleLoss(nn.Module):
     '''
     source: "Circle Loss: A Unified Perspective of Pair Similarity Optimization."
@@ -22,14 +23,16 @@ class CircleLoss(nn.Module):
 
         b = inputs.size(0)
         alpha = torch.clamp_min(inputs + self.m, min=0)
-        alpha[range(b), target] = torch.clamp_min(- inputs[range(b), target] + 1 + self.m, min=0).type_as(inputs)
+        alpha[range(b), target] = torch.clamp_min(-inputs[range(b), target] + 1 + self.m, min=0).type_as(inputs)
         delta = torch.ones_like(inputs, device=inputs.device, dtype=inputs.dtype) * self.m
         delta[range(b), target] = (1 - self.m).type_as(inputs)
 
         return self.loss(alpha * (inputs - delta) * self.gamma, target)
+########################### Circle Loss ###########################
 
 
 
+########################### Mis-classified Vector Guided Softmax ###########################
 class MrossEntropyLoss(nn.Module):
     '''
     source: "Mis-classified Vector Guided Softmax Loss for Face Recognition."
@@ -106,9 +109,11 @@ class MrossEntropyLoss(nn.Module):
         cos_theta.scatter_(1, target.view(-1, 1), final_gt)
 
         return self.loss(cos_theta*self.s, target)
+########################### Mis-classified Vector Guided Softmax ###########################
 
 
 
+########################### Curricular Face ###########################
 class CurricularFace(nn.Module):
     '''
     source: "CurricularFace: Adaptive Curriculum Learning Loss for Deep Face Recognition."
@@ -143,3 +148,25 @@ class CurricularFace(nn.Module):
         cos_theta.scatter_(1, labels.view(-1, 1), cos_theta_m)
 
         return self.loss(self.s*cos_theta, labels)
+########################### Curricular Face ###########################
+
+
+
+########################### Label Smoothing ###########################
+class LabelSmoothing(nn.Module):
+    def __init__(self, smoothing=0.0):
+        super().__init__()
+
+        self.confidence = 1.0 - smoothing
+        self.smoothing = smoothing
+
+    def forward(self, x, target):
+
+        logprobs = torch.nn.functional.log_softmax(x, dim=-1)
+        nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
+        nll_loss = nll_loss.squeeze(1)
+        smooth_loss = -logprobs.mean(dim=-1)
+        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
+
+        return loss.mean()
+########################### Label Smoothing ###########################
