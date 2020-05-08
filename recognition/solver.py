@@ -16,6 +16,8 @@ from .utils.layerutils import NormLinear
 from .models.resnets import resnet101 as Extractor
 from .utils.datautils import Spliter, RandomBluring
 
+
+
 # random seeds
 SEED = 2334
 torch.manual_seed(SEED)
@@ -71,7 +73,13 @@ if __name__ == '__main__':
     hparams = parser.parse_args()
 
     # config
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True
+    else:
+        device = torch.device('cpu')
+
     snapshots = 'snapshots/{}'.format(datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
     if not os.path.exists(snapshots):
         os.makedirs(snapshots)
