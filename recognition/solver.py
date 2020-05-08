@@ -61,7 +61,7 @@ class Learner(pl.LightningModule):
         train_tfms = transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=(0.5,), std=(0.5)),
+            transforms.Normalize(mean=(0.5,), std=(0.5,)),
             transforms.RandomErasing(p=0.5, scale=(0.1, 0.5), value='random'),
             RandomBluring(p=0.5, high=2)
         ])
