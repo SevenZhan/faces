@@ -12,4 +12,4 @@
 
 
 # TODO:
-    * mix-precision training with pure pytorch, no using apex; (from pytorch 1.5, mix-precision is said to be supported)
+    * mix-precision training with pure pytorch, not using apex; (from pytorch 1.5, mix-precision is said to be supported)
