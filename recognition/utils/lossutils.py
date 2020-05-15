@@ -170,3 +170,27 @@ class LabelSmoothing(nn.Module):
 
         return loss.mean()
 ########################### Label Smoothing ###########################
+
+
+
+########################### Unknown Identity Rejection ###########################
+class UIRLoss(nn.Module):
+    '''
+    source: "Unknown Identity Rejection Loss: Utilizing Unlabeled Data for Face Recognition."
+    '''
+    def __init__(self):
+        super().__init__()
+
+        self.softmax = nn.Sequential(
+            nn.Softmax(dim=-1),
+            nn.LogSoftmax(dim=-1)
+        )
+
+    def forward(self, inputs):
+
+        outs = self.softmax(inputs)
+        outs = torch.sum(outs, dim=-1)
+        assert outs.size(0) == inputs.size(0)
+
+        return -outs.mean()
+########################### Unknown Identity Rejection ###########################
