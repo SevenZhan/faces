@@ -7,4 +7,9 @@
     * layerutils.py: contains some custom layers;
     * lossutils.py: contains popular loss functions used in face recognition task, e.g. Arcface;
 
-3. **solver.py**: this is a code written with pytorch-lightning library;
+3. **solver.py**: training script with DistributedDataParallel support;
+
+
+
+# TODO:
+    * mix-precision training with pure pytorch, no using apex; (from pytorch 1.5, mix-precision is said to be supported)
