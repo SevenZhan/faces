@@ -4,7 +4,7 @@ from PIL import Image, ImageFilter
 from pathlib import Path
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, distributed
 
 
 
@@ -67,12 +67,13 @@ class Spliter(object):
     def __call__(self, transform=None, target_transform=None, batch_size=64, num_workers=0):
 
         trainset = ImageItemList(self.trainlist, self.labels2idxs, transform=transform[0], target_transform=target_transform)
-        trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True, pin_memory=True, drop_last=True, num_workers=num_workers)
+        trainsampler = distributed.DistributedSampler(trainset)
+        trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=False, pin_memory=True, drop_last=True, num_workers=num_workers, sampler=trainsampler)
 
         validset = ImageItemList(self.validlist, self.labels2idxs, transform=transform[1], target_transform=target_transform)
         validloader = DataLoader(validset, batch_size=batch_size*2, shuffle=True, pin_memory=True, drop_last=True, num_workers=num_workers)
 
-        return trainloader, validloader
+        return trainloader, validloader, trainsampler
 
 
 
