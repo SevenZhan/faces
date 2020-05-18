@@ -1,4 +1,5 @@
 import os
+import cv2
 import random
 from PIL import Image, ImageFilter
 from pathlib import Path
@@ -94,7 +95,8 @@ class ImageItemList(Dataset):
     def __getitem__(self, index):
 
         imgpath, target = self.items[index]
-        img = Image.open(imgpath).convert('RGB')
+        img = cv2.imread(imgpath)
+        img = Image.fromarray(img)
         label = self.labels2idxs[target]
         if self.transform is not None:
             img = self.transform(img)
