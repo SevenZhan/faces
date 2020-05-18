@@ -69,13 +69,17 @@ def validate(model, valid_dl, criterion, args):
     loss = 0.
     acc = 0.
     with torch.no_grad():
-        for batch in valid_dl:
+        for i, batch in enumerate(valid_dl):
+            step = i + 1
             inputs, labels = batch[0].cuda(args.gpu, non_blocking=True), batch[1].cuda(args.gpu, non_blocking=True)
             ouputs = model(inputs)
             loss += criterion(ouputs, labels)
             acc += ouputs.argmax(dim=-1).eq(labels).float().mean()
 
-    return loss/len(valid_dl), acc/len(valid_dl)
+    if args.rank == 0:
+        print('[INFO] Computer metrics...')
+        print(' Validation Results - Average Loss: {:.04f} | Accuracy {:.04f}'.format(loss/step, acc/step))
+        print('[INFO] Complete metrics...')
 
 
 
@@ -98,7 +102,7 @@ def engine(gpu, args):
         transforms.ToTensor(),
         transforms.Normalize(mean=(0.5,), std=(0.5,))
     ])
-    train_dl, valid_dl, train_sp = data(transform=[train_tfms, valid_tfms], batch_size=args.batch_size, num_workers=args.workers)
+    train_dl, train_sp, valid_dl, valid_sp = data(transform=[train_tfms, valid_tfms], batch_size=args.batch_size, num_workers=args.workers)
     # modeling
     model = Learner(num_classes=len(data.labels))
     torch.cuda.set_device(gpu)
@@ -116,19 +120,16 @@ def engine(gpu, args):
     snapshots = 'snapshots/{}'.format(datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
     for epoch in range(args.epochs):
         train_sp.set_epoch(epoch)
+        valid_sp.set_epoch(epoch)
         train(model, train_dl, criterion, optimizer, epoch, args)
         scheduler.step()
+        validate(model, valid_dl, criterion, args)
         if args.rank == 0:
-            # validation
-            print('[INFO] Computer metrics...')
-            valid_loss, valid_acc = validate(model, valid_dl, criterion, args)
-            print(' Validation Results - Average Loss: {:.04f} | Accuracy {:.04f}'.format(valid_loss, valid_acc))
-            print('[INFO] Complete metrics...')
             # checkpointing
             print('[INFO] Saving model...')
             if not os.path.exists(snapshots):
                 os.makedirs(snapshots)
-            torch.save(model.module.state_dict(), '{}/epoch={:0>2d}-valid_acc={:.04f}.pth'.format(snapshots, epoch+1, valid_acc))
+            torch.save(model.module.state_dict(), '{}/epoch={:0>2d}.pth'.format(snapshots, epoch+1))
     # finalize
     dist.destroy_process_group()
 

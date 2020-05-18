@@ -68,12 +68,13 @@ class Spliter(object):
 
         trainset = ImageItemList(self.trainlist, self.labels2idxs, transform=transform[0], target_transform=target_transform)
         trainsampler = distributed.DistributedSampler(trainset)
-        trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=False, pin_memory=True, drop_last=True, num_workers=num_workers, sampler=trainsampler)
+        trainloader = DataLoader(trainset, batch_size=batch_size, pin_memory=True, drop_last=True, num_workers=num_workers, sampler=trainsampler)
 
         validset = ImageItemList(self.validlist, self.labels2idxs, transform=transform[1], target_transform=target_transform)
-        validloader = DataLoader(validset, batch_size=batch_size*2, shuffle=True, pin_memory=True, drop_last=True, num_workers=num_workers)
+        validsampler = distributed.DistributedSampler(validset)
+        validloader = DataLoader(validset, batch_size=batch_size, pin_memory=True, drop_last=True, num_workers=num_workers, sampler=validsampler)
 
-        return trainloader, validloader, trainsampler
+        return trainloader, trainsampler, validloader, validsampler
 
 
 
